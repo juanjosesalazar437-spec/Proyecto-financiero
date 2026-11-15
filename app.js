@@ -101,10 +101,20 @@ const CATS = {
   otros: { nombre: 'Otros', titulo: 'Otros gastos', subs: ['Otros gastos'], unaLista: true },
 };
 
+/* Colores de las gráficas de gastos e ingresos */
+const COLORES_GASTOS = ['#c94343', '#1597d4', '#1b6b25', '#e8b20a', '#e8732f', '#135f86', '#9aa3b2', '#8a5cd1'];
+const COLORES_INGRESOS = ['#1fad1f', '#135f86', '#1597d4', '#e8732f', '#8a5cd1', '#1b6b25', '#e8b20a', '#c94343', '#9aa3b2'];
+
 function datosVacios() {
   return { perfil: { completo: false }, patrimonioInicial: 0, meses: {}, movs: [], creado: Date.now() };
 }
-function guardar() { if (usuario) store.set(kDatos(usuario.email), D); }
+/** Guarda los datos del usuario. Devuelve true solo si quedaron guardados de verdad. */
+function guardar() {
+  if (!usuario) return false;
+  if (!store.set(kDatos(usuario.email), D)) return false;
+  // Comprobación: lo que quedó en el navegador debe coincidir con lo que hay en memoria
+  try { return localStorage.getItem(kDatos(usuario.email)) === JSON.stringify(D); } catch { return false; }
+}
 
 function cargarSesion() {
   const email = store.get(K_SESION, null);
@@ -199,6 +209,39 @@ function gastoPorCategoria(k) {
   (t.g.otros || []).forEach((o) => add(o.categoria || 'Otros', o.monto));
   add('Gastos Hormiga', t.hormigaForm);
   return [...map.entries()].map(([label, value]) => ({ label, value }));
+}
+/** Tipo de gasto (id de CATS) al que pertenece un "otro gasto" del formulario mensual.
+    Vivienda, Servicios y cualquier categoría sin página propia van a "Otros". */
+function catDeExtra(categoria) {
+  return Object.keys(CATS).find((id) => CATS[id].nombre === categoria) || 'otros';
+}
+/** Total del mes por tipo de gasto: movimientos puntuales + gastos del formulario mensual */
+function totalPorTipo(k) {
+  const t = totalesMes(k);
+  const r = {};
+  Object.keys(CATS).forEach((id) => { r[id] = 0; });
+  t.movG.forEach((m) => { const id = CATS[m.cat] ? m.cat : 'otros'; r[id] += num(m.monto); });
+  (t.g.otros || []).forEach((o) => { r[catDeExtra(o.categoria)] += num(o.monto); });
+  r.hormiga += t.hormigaForm;
+  return r;
+}
+/** Gastos del mes para la gráfica de torta: deudas + cada tipo de gasto */
+function gastosParaGrafica(k) {
+  const t = totalesMes(k);
+  const tipos = totalPorTipo(k);
+  return [{ label: 'Deudas', value: t.deudas }, ...Object.entries(CATS).map(([id, c]) => ({ label: c.nombre, value: tipos[id] }))]
+    .map((x, i) => ({ ...x, color: COLORES_GASTOS[i % COLORES_GASTOS.length] })).filter((x) => x.value > 0);
+}
+/** Ingresos del mes para la gráfica de torta: salario, activos puntuales y cada fuente pasiva */
+function ingresosParaGrafica(k) {
+  const t = totalesMes(k);
+  return [
+    { label: 'Salario', value: t.salario },
+    { label: 'Otros activos', value: t.activosMov },
+    ...FUENTES.map(([c, n]) => ({ label: n, value: num(t.i[c]) })),
+    ...(t.i.otros || []).map((o) => ({ label: o.nombre, value: num(o.monto) })),
+    { label: 'Pasivos puntuales', value: t.pasivosMov },
+  ].map((x, i) => ({ ...x, color: COLORES_INGRESOS[i % COLORES_INGRESOS.length] })).filter((x) => x.value > 0);
 }
 
 /* ---------------------------------------------------------------------
@@ -313,11 +356,11 @@ function graficaBarras({ etiquetas, series, alto = 280, formato = fmtM, sufijoTi
   return s + '</svg>';
 }
 /** Torta para gastos hormiga */
-function graficaTorta(items, colores) {
+function graficaTorta(items, colores, etiqueta = 'Distribución de gastos hormiga') {
   const total = sum(items.map((i) => i.value));
   const R = 90, C = 100;
   if (!total) return `<svg class="grafica" viewBox="0 0 200 200" style="max-width:220px"><circle cx="100" cy="100" r="90" fill="#eef1f6"/><text x="100" y="105" text-anchor="middle" font-size="14" fill="#8a8a8a">Sin registros</text></svg>`;
-  let ang = -Math.PI / 2, s = `<svg class="grafica" viewBox="0 0 200 200" style="max-width:240px" role="img" aria-label="Distribución de gastos hormiga">`;
+  let ang = -Math.PI / 2, s = `<svg class="grafica" viewBox="0 0 200 200" style="max-width:240px" role="img" aria-label="${esc(etiqueta)}">`;
   items.forEach((it, i) => {
     if (!it.value) return;
     const a = (it.value / total) * Math.PI * 2;
@@ -438,7 +481,9 @@ function modalMovimiento({ tipo = 'gasto', cat = '', sub = '' } = {}) {
       if (err) { const x = $('#mErr', b); x.textContent = err; x.hidden = false; return; }
       const m = { id: 'm' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), tipo, desc, fecha, monto };
       if (ing) m.clase = $('#mClase', b).value; else { m.cat = $('#mCat', b).value; m.sub = $('#mSub', b).value; }
-      D.movs.push(m); guardar(); fijarMes(mesDe(fecha)); cerrarModal();
+      D.movs.push(m);
+      if (!guardar()) { D.movs.pop(); const x = $('#mErr', b); x.textContent = 'No se pudo guardar en este navegador. Inténtalo de nuevo.'; x.hidden = false; return; }
+      fijarMes(mesDe(fecha)); cerrarModal();
       toast(ing ? 'Ingreso añadido.' : 'Gasto añadido.'); render();
     });
   });
@@ -642,6 +687,25 @@ function tablaFilas(filas) {
 }
 function ultimos6(k) { return Array.from({ length: 6 }, (_, i) => sumarMeses(k, i - 5)); }
 
+/* Gráficas de las páginas de Historial de gastos e Historial de ingresos */
+/** Tarjeta con barras de los últimos 6 meses. series: [{nombre, color, campo}] (campo de totalesMes) */
+function tarjetaBarras6(titulo, series) {
+  const meses6 = ultimos6(mesSel).map(totalesMes);
+  return `<div class="card"><h3>${esc(titulo)}</h3>
+    <div class="fila entre" style="flex-wrap:wrap;margin-bottom:6px"><span class="muted">Últimos 6 meses</span>
+      <div class="leyenda">${series.map((s) => `<span><i style="background:${s.color}"></i>${esc(s.nombre)}</span>`).join('')}</div></div>
+    ${graficaBarras({ etiquetas: meses6.map((m) => MES_CORTO[+m.k.slice(5) - 1].toUpperCase()), series: series.map((s) => ({ nombre: s.nombre, color: s.color, valores: meses6.map((m) => m[s.campo]) })) })}
+  </div>`;
+}
+/** Tarjeta con la torta del mes seleccionado y su leyenda */
+/** items: [{label, value, color}] */
+function tarjetaTorta(titulo, items, vacio) {
+  return `<div class="card pie-wrap"><h3 style="align-self:flex-start;margin-bottom:0">${esc(titulo)}</h3>
+    ${graficaTorta(items, items.map((x) => x.color), titulo)}
+    ${items.length ? `<div class="pie-leyenda">${items.map((x) => `<div>${esc(x.label)}<b>${fmt(x.value)}</b><i style="background:${x.color}"></i></div>`).join('')}</div>` : `<p class="vacio" style="margin:0">${esc(vacio)}</p>`}
+  </div>`;
+}
+
 const vInicio = {
   html() {
     const t = totalesMes(mesSel);
@@ -785,7 +849,7 @@ const vMes = {
       </section>
       <section class="grid g2" style="margin-top:32px">
         <div class="card"><h3>Ingresos pasivos</h3>${tablaFilas([...FUENTES.map(([c, n]) => ({ l: n, v: t.i[c] ?? null, color: 'verde' })), ...(t.i.otros || []).map((o) => ({ l: o.nombre, v: o.monto, color: 'verde' })), { l: 'Total Pasivos =', v: t.pasivosFuentes + t.pasivosOtros, color: 'verde', clase: 'total' }])}</div>
-        <div class="card"><h3>Gastos mensuales</h3>${tablaFilas([...DEUDAS.map(([c, n]) => ({ l: n, v: t.g[c] ?? null, color: 'rojo' })), ...HORMIGA.map(([c, n]) => ({ l: n + ' (hormiga)', v: t.g[c] ?? null, color: 'naranja' })), ...(t.g.otros || []).map((o) => ({ l: `${o.concepto} (${o.categoria})`, v: o.monto, color: 'rojo' })), { l: 'Total Deudas =', v: t.deudas, color: 'rojo', clase: 'total' }])}</div>
+        <div class="card"><h3>Gastos mensuales</h3>${tablaFilas([...DEUDAS.map(([c, n]) => ({ l: n, v: t.g[c] ?? null, color: 'rojo' })), { l: 'Total deudas', v: t.deudas, color: 'rojo', clase: 'fuerte' }, ...HORMIGA.map(([c, n]) => ({ l: n + ' (hormiga)', v: t.g[c] ?? null, color: 'naranja' })), ...(t.g.otros || []).map((o) => ({ l: `${o.concepto} (${o.categoria})`, v: o.monto, color: 'rojo' })), { l: 'Total registrado =', v: t.deudas + t.hormigaForm + t.otrosForm, color: 'rojo', clase: 'total' }])}</div>
       </section>
       <section class="grid g2" style="margin-top:12px">
         <div><h2 class="subtitulo">Ingresos Mensuales:</h2>${ordenarMovs(t.movI).map((m) => movHTML(m)).join('') || '<p class="vacio">Sin ingresos puntuales este mes.</p>'}
@@ -810,6 +874,10 @@ const vIngresos = {
         ${kpiHTML({ titulo: 'Ingresos activos', valor: t.activos, icono: IC.billetera, clase: 'ico--verde', href: '#/ingresos-mes' })}
         ${kpiHTML({ titulo: 'Ingresos pasivos', valor: t.pasivos, icono: IC.monedas, clase: 'ico--naranja', href: '#/ingresos-mes' })}
         ${kpiHTML({ titulo: 'Ahorro', valor: t.ahorro, icono: IC.alcancia, clase: 'ico--cian', href: '#/mes/' + mesSel })}
+      </section>
+      <section class="grid g2" style="margin-top:32px;align-items:start">
+        ${tarjetaBarras6('Ingresos por mes', [{ nombre: 'Activos', color: '#1fad1f', campo: 'activos' }, { nombre: 'Pasivos', color: '#135f86', campo: 'pasivos' }])}
+        ${tarjetaTorta(`Ingresos de ${nombreMes(mesSel)} por fuente`, ingresosParaGrafica(mesSel), 'No hay ingresos registrados este mes.')}
       </section>
       <section class="grid g2" style="margin-top:32px">
         <div class="card"><h3>Ingresos pasivos</h3>${tablaFilas([...FUENTES.map(([c, n]) => ({ l: n, v: t.i[c] ?? null, color: 'verde' })), ...(t.i.otros || []).map((o) => ({ l: o.nombre, v: o.monto, color: 'verde' })), ...(t.pasivosMov ? [{ l: 'Ingresos pasivos puntuales', v: t.pasivosMov, color: 'verde' }] : []), { l: 'Total Pasivos =', v: t.pasivos, color: 'verde', clase: 'total' }])}</div>
@@ -862,6 +930,7 @@ const vGastos = {
   html() {
     const t = totalesMes(mesSel);
     const cats = gastoPorCategoria(mesSel);
+    const tipos = totalPorTipo(mesSel);
     const perdidas = sum(t.movG.filter((m) => m.cat === 'perdidas').map((m) => m.monto)) + sum((t.g.otros || []).filter((o) => o.categoria === 'Pérdidas').map((o) => o.monto));
     const sacado = Math.max(0, t.gastos - t.ingresos);
     return `<div class="pagina"><h1 class="titulo-pagina">Historial de gastos</h1>
@@ -872,6 +941,10 @@ const vGastos = {
         ${kpiHTML({ titulo: 'Pérdidas inversiones', valor: perdidas, icono: IC.monedas, clase: 'ico--naranja', href: '#/categoria/perdidas' })}
         ${kpiHTML({ titulo: 'Sacado de ahorro', valor: sacado, icono: IC.alcancia, clase: 'ico--cian', href: '#/mes/' + mesSel })}
       </section>
+      <section class="grid g2" style="margin-top:32px;align-items:start">
+        ${tarjetaBarras6('Gastos por mes', [{ nombre: 'Deudas', color: '#c94343', campo: 'deudas' }, { nombre: 'Hormiga', color: '#e8732f', campo: 'hormiga' }, { nombre: 'Otros', color: '#8a5cd1', campo: 'otros' }])}
+        ${tarjetaTorta(`Gastos de ${nombreMes(mesSel)} por tipo`, gastosParaGrafica(mesSel), 'No hay gastos registrados este mes.')}
+      </section>
       <section class="grid g2" style="margin-top:32px">
         <div class="card"><h3>Gastos mensuales</h3>${tablaFilas([...cats.filter((c) => c.value).map((c) => ({ l: c.label, v: c.value, color: 'rojo' })), { l: 'Total Gastos =', v: t.hormiga + t.otros, color: 'rojo', clase: 'total' }])}</div>
         <div class="card"><h3>Deudas</h3>${tablaFilas([...DEUDAS.map(([c, n]) => ({ l: n, v: t.g[c] ?? null, color: 'rojo' })), { l: 'Total deudas', v: t.deudas, color: 'rojo', clase: 'fuerte' }, { l: 'Gastos hormiga (aprox.)', v: t.hormiga, color: 'naranja' }, { l: 'Total egresos =', v: t.gastos, color: 'rojo', clase: 'total' }])}</div>
@@ -879,7 +952,7 @@ const vGastos = {
       <section class="grid g2" style="margin-top:12px">
         <div><h2 class="subtitulo">Gastos Fijos</h2>${ordenarMovs(t.movG).map((m) => movHTML(m)).join('') || '<p class="vacio">Sin gastos puntuales este mes.</p>'}
           <div class="anadir-fila"><button class="link-rojo" data-accion="nuevo-mov" data-tipo="gasto">+ Añadir Gasto</button></div></div>
-        <div><h2 class="subtitulo">Tipos de Gastos</h2>${Object.entries(CATS).map(([id, c]) => `<a class="tipo-gasto" href="#/categoria/${id}">${esc(c.nombre)}<span>${fmt((cats.find((x) => x.label === c.nombre) || {}).value || 0)}</span></a>`).join('')}</div>
+        <div><h2 class="subtitulo">Tipos de Gastos</h2>${Object.entries(CATS).map(([id, c]) => `<a class="tipo-gasto" href="#/categoria/${id}">${esc(c.nombre)}<span>${fmt(tipos[id])}</span></a>`).join('')}</div>
       </section></div>`;
   },
 };
@@ -888,7 +961,8 @@ const vCategoria = {
   html(id) {
     const c = CATS[id]; if (!c) return noEncontrado();
     const movs = ordenarMovs(movsDelMes(mesSel).filter((m) => m.tipo === 'gasto' && m.cat === id));
-    const total = sum(movs.map((m) => m.monto)) + (id === 'hormiga' ? totalesMes(mesSel).hormigaForm : 0);
+    const total = totalPorTipo(mesSel)[id];
+    const delForm = (totalesMes(mesSel).g.otros || []).filter((o) => catDeExtra(o.categoria) === id);
     const lista = (sub, unaLista) => {
       const items = unaLista ? movs : movs.filter((m) => m.sub === sub);
       return `<div class="cat-lista">${items.map((m) => movHTML(m)).join('') || '<div class="mov sin-punto"><span class="muted">Sin gastos registrados</span><span class="desc">Descripción y fecha</span></div>'}
@@ -902,6 +976,8 @@ const vCategoria = {
       <div class="fila entre" style="flex-wrap:wrap;margin-bottom:8px">${selectorMes()}<b>Total del mes: <span class="rojo">${fmt(total)}</span></b></div>
       ${c.texto ? `<h2 class="subtitulo">¿Qué es un gasto hormiga?</h2><p class="texto-grande">${esc(c.texto)}</p>
         <div class="card"><h3>Registrados en el formulario del mes</h3>${tablaFilas([...HORMIGA.map(([k, n]) => ({ l: n, v: totalesMes(mesSel).g[k] ?? null, color: 'naranja' })), { l: 'Total gastos hormiga =', v: total, color: 'naranja', clase: 'total' }])}
+        <div style="margin-top:10px"><a class="link" href="#/registrar-gastos?mes=${mesSel}">Editar en Registrar gastos →</a></div></div>` : ''}
+      ${delForm.length ? `<div class="card" style="margin-top:16px"><h3>Registrados en el formulario del mes</h3>${tablaFilas([...delForm.map((o) => ({ l: o.categoria && o.categoria !== c.nombre ? `${o.concepto} · ${o.categoria}` : o.concepto, v: o.monto, color: 'rojo' })), { l: 'Total del formulario =', v: sum(delForm.map((o) => o.monto)), color: 'rojo', clase: 'total' }])}
         <div style="margin-top:10px"><a class="link" href="#/registrar-gastos?mes=${mesSel}">Editar en Registrar gastos →</a></div></div>` : ''}
       ${cuerpo}</div>`;
   },
@@ -993,28 +1069,39 @@ function vRegistrar(tipo) {
       };
       $('#fReg').addEventListener('input', resumen);
       $('#fMes').addEventListener('change', cargar); $('#fAnio').addEventListener('change', cargar);
-      $('#btnExtra').addEventListener('click', () => {
+      /* ¿Quedó algo escrito en "Añadir otro gasto / fuente" sin pulsar el botón? */
+      const extraPendiente = () => Boolean($('#xConcepto').value.trim() || parseDinero($('#xMonto').value) != null || (esG && $('#xCat').value));
+      const anadirExtra = () => {
         const nombre = $('#xConcepto').value.trim(); const monto = parseDinero($('#xMonto').value); const cat = esG ? $('#xCat').value : '';
         const err = !nombre ? (esG ? 'Escribe el concepto del gasto.' : 'Escribe el nombre de la fuente.') : esG && !cat ? 'Selecciona una categoría.' : monto == null ? 'Escribe el importe.' : '';
-        $('#xErr').textContent = err; if (err) return;
+        $('#xErr').textContent = err; if (err) return false;
         extras.push(esG ? { concepto: nombre, categoria: cat, monto } : { nombre, monto });
         $('#xConcepto').value = ''; $('#xMonto').value = ''; if (esG) $('#xCat').value = '';
         pintarExtras(); resumen();
-      });
+        return true;
+      };
+      $('#btnExtra').addEventListener('click', anadirExtra);
       $('#cancelar').addEventListener('click', () => history.length > 1 ? history.back() : (location.hash = '#/finanzas'));
       $('#fReg').addEventListener('submit', (e) => {
         e.preventDefault();
         const k = claveForm();
         if (!marcarError('fMes', k ? '' : 'Selecciona el mes.')) { $('#fMes').focus(); return; }
+        const er = $('#regErr');
+        // Si el usuario escribió un gasto adicional pero no pulsó "+ Añadir", se añade ahora para no perderlo
+        if (extraPendiente() && !anadirExtra()) {
+          er.textContent = esG ? 'Completa el gasto adicional (concepto, categoría e importe) o bórralo antes de guardar.' : 'Completa la fuente adicional (nombre e importe) o bórrala antes de guardar.';
+          er.hidden = false; $('#xErr').scrollIntoView({ behavior: 'smooth', block: 'center' }); return;
+        }
         const obj = {}; campos.forEach(([c]) => { obj[c] = valor(c); });
         const algo = Object.values(obj).some((v) => v != null) || extras.length;
-        const er = $('#regErr');
         if (!algo) { er.textContent = 'Completa al menos un importe antes de guardar.'; er.hidden = false; return; }
         er.hidden = true;
-        obj.otros = extras;
+        obj.otros = extras.map((x) => ({ ...x }));
         D.meses[k] = D.meses[k] || {};
         D.meses[k][esG ? 'gastos' : 'ingresos'] = obj;
-        guardar(); fijarMes(k);
+        if (!guardar()) { er.textContent = 'No se pudieron guardar los datos en este navegador. Revisa que no estés en modo incógnito ni con el almacenamiento lleno e inténtalo de nuevo.'; er.hidden = false; return; }
+        fijarMes(k);
+        $('#fReg button.btn--bloque').disabled = true; // evita guardar dos veces mientras se redirige
         abrirModal(`<div style="text-align:center"><div class="check-ok">${IC.check}</div><h2>${esG ? '¡Gastos guardados!' : '¡Ingresos guardados!'}</h2><p>${esG ? 'Te estamos llevando a tu historial de gastos.' : 'Te estamos llevando a tu historial de ingresos pasivos.'}</p></div>`);
         setTimeout(() => { cerrarModal(); location.hash = esG ? '#/gastos' : '#/ingresos'; }, 1600);
       });
